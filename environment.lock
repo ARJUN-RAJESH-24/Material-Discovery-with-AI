@@ -1,0 +1,2 @@
+# Environment lock file (recorded versions)
+# Run: conda list --export > environment.lock

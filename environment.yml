@@ -1,0 +1,31 @@
+name: matdl
+channels:
+  - pyg
+  - pytorch
+  - conda-forge
+dependencies:
+  - python=3.10
+  - numpy
+  - pandas
+  - scikit-learn
+  - matplotlib
+  - tqdm
+  - pymatgen
+  - ase
+  - matminer
+  - pytorch
+  - torchvision
+  - torchaudio
+  - pytorch-geometric
+  - networkx
+  - scipy
+  - pyyaml
+  - seaborn
+  - tensorboard
+  - mlflow
+  - joblib
+  - requests
+  - pip
+  - pip:
+      - rdkit-pypi
+      - wandb

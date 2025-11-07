@@ -1,0 +1,13 @@
+{
+    "model_name": "cgcnn",
+    "batch_size": 32,
+    "learning_rate": 0.001,
+    "epochs": 50,
+    "cutoff_radius": 8.0,
+    "num_conv_layers": 3,
+    "hidden_dim": 64,
+    "dropout": 0.1,
+    "dataset_path": "data/sample_mini.pkl",
+    "graph_path": "graphs/",
+    "model_save_path": "models/cgcnn_model.pt"
+}

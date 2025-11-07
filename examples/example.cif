@@ -1,0 +1,2 @@
+# Example CIF file placeholder
+# Replace with real crystal structure files for testing.
