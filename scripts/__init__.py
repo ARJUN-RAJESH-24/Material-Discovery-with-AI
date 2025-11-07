@@ -1,3 +1,1 @@
-"""Scripts package for CLI entrypoints (training, preprocessing, baseline)."""
-
-
+# empty initializer for scripts package

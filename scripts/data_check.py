@@ -1,14 +1,13 @@
-import pandas as pd
+#!/usr/bin/env python3
+import pandas as pd, os, sys
 
-df = pd.read_pickle("data/sample_mini.pkl")
+path = sys.argv[1] if len(sys.argv)>1 else "data/processed.pkl"
+assert os.path.exists(path), f"File not found: {path}"
 
+df = pd.read_pickle(path)
 print("Rows:", len(df))
-print("Columns:", df.columns)
-print(df.isna().sum())
-
-# Basic checks
-assert "structure" in df.columns, "Missing 'structure' column!"
-assert "formation_energy_per_atom" in df.columns, "Missing formation energy!"
-assert len(df) > 0, "Dataset empty!"
-
-print("✅ Data check passed!")
+print("Columns:", list(df.columns))
+print(df[["structure","formation_energy_per_atom","band_gap"]].isna().sum())
+assert "structure" in df.columns, "Missing 'structure'"
+assert "formation_energy_per_atom" in df.columns, "Missing 'formation_energy_per_atom'"
+print("✅ Data check passed.")

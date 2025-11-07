@@ -1,123 +1,103 @@
-from __future__ import annotations
-
-import argparse
-import json
-from pathlib import Path
-
+#!/usr/bin/env python3
+"""
+Train CGCNN using graphs/ as dataset cache and configs/config.json for hyperparams.
+Supports single-task or multi-task (len(targets) > 1).
+"""
+import argparse, json, os, glob, random
+import numpy as np
 import torch
-from rich import print
 from torch.utils.data import random_split
-from torch_geometric.data import Data, Dataset
 from torch_geometric.loader import DataLoader
-
 from scripts.models.cgcnn import CGCNN
+from utils.data_loading import GraphFolderDataset
+from utils.config import load_config
+from tqdm import tqdm
 
+def set_seed(seed=42):
+    random.seed(seed); np.random.seed(seed); torch.manual_seed(seed); torch.cuda.manual_seed_all(seed)
 
-class GraphFolderDataset(Dataset):
-    def __init__(self, folder: str | Path):
-        super().__init__()
-        self.folder = Path(folder)
-        self.paths = sorted(list(self.folder.glob("*.pt")))
-
-    def len(self) -> int:  # type: ignore[override]
-        return len(self.paths)
-
-    def get(self, idx: int) -> Data:  # type: ignore[override]
-        return torch.load(self.paths[idx])
-
-
-def train_one_epoch(model, loader, optimizer, device):
+def train_one_epoch(model, loader, opt, loss_fn, device):
     model.train()
-    total = 0.0
-    n = 0
+    epoch_loss = 0.0
     for batch in loader:
         batch = batch.to(device)
-        pred = model(batch.x, batch.edge_index, batch.edge_attr, batch.batch)
-        if getattr(batch, "y", None) is None:
-            raise RuntimeError("Training graphs must include 'y'")
-        y = batch.y.view(-1).to(device)
-        loss = torch.nn.functional.l1_loss(pred, y)
-        optimizer.zero_grad()
+        opt.zero_grad()
+        pred = model(batch)
+        target = batch.y if batch.y.ndim == 2 else batch.y.unsqueeze(-1)
+        loss = loss_fn(pred, target.squeeze(-1))
         loss.backward()
-        optimizer.step()
-        total += float(loss.item()) * batch.num_graphs
-        n += batch.num_graphs
-    return total / max(n, 1)
-
+        opt.step()
+        epoch_loss += loss.item() * batch.num_graphs
+    return epoch_loss / len(loader.dataset)
 
 @torch.no_grad()
-def evaluate(model, loader, device):
+def eval_epoch(model, loader, loss_fn, device):
     model.eval()
-    total = 0.0
-    n = 0
+    epoch_loss = 0.0
     for batch in loader:
         batch = batch.to(device)
-        pred = model(batch.x, batch.edge_index, batch.edge_attr, batch.batch)
-        y = batch.y.view(-1).to(device)
-        loss = torch.nn.functional.l1_loss(pred, y)
-        total += float(loss.item()) * batch.num_graphs
-        n += batch.num_graphs
-    return total / max(n, 1)
-
+        pred = model(batch)
+        target = batch.y if batch.y.ndim == 2 else batch.y.unsqueeze(-1)
+        loss = loss_fn(pred, target.squeeze(-1))
+        epoch_loss += loss.item() * batch.num_graphs
+    return epoch_loss / len(loader.dataset)
 
 def main():
-    parser = argparse.ArgumentParser(description="Train CGCNN on PyG graphs")
-    parser.add_argument("--graphs-dir", type=str, required=True)
-    parser.add_argument("--epochs", type=int, default=100)
-    parser.add_argument("--batch-size", type=int, default=64)
-    parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--num-workers", type=int, default=0)
-    parser.add_argument("--model-dir", type=str, required=True)
-    parser.add_argument("--results-dir", type=str, default="results/")
-    parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--config", default="configs/config.json")
+    ap.add_argument("--graphs", default="graphs")
+    ap.add_argument("--seed", type=int, default=42)
+    args = ap.parse_args()
 
-    args = parser.parse_args()
+    cfg = load_config(args.config)
+    graphs_path = cfg.get("graph_path", args.graphs)
+    targets = cfg.get("targets", ["formation_energy_per_atom"])
+    batch_size = int(cfg.get("batch_size", 32))
+    lr = float(cfg.get("learning_rate", 1e-3))
+    epochs = int(cfg.get("epochs", 50))
+    hidden = int(cfg.get("hidden_dim", 128))
+    n_conv = int(cfg.get("num_conv_layers", 3))
+    dropout = float(cfg.get("dropout", 0.1))
+    model_save = cfg.get("model_save_path", "models/cgcnn_model.pt")
 
-    model_dir = Path(args.model_dir)
-    model_dir.mkdir(parents=True, exist_ok=True)
-    results_dir = Path(args.results_dir)
-    results_dir.mkdir(parents=True, exist_ok=True)
+    set_seed(args.seed)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    dataset = GraphFolderDataset(args.graphs_dir)
-    if len(dataset) == 0:
-        raise RuntimeError("No .pt graphs found. Run scripts/graph_preprocessing.py first.")
+    dataset = GraphFolderDataset(graphs_path, targets=targets)
+    n = len(dataset)
+    n_train = int(0.8 * n)
+    n_val = int(0.1 * n)
+    n_test = n - n_train - n_val
+    train_set, val_set, test_set = random_split(dataset, [n_train, n_val, n_test], generator=torch.Generator().manual_seed(args.seed))
 
-    n_total = len(dataset)
-    n_val = max(1, int(0.1 * n_total))
-    n_test = max(1, int(0.1 * n_total))
-    n_train = max(1, n_total - n_val - n_test)
-    train_set, val_set, test_set = random_split(dataset, [n_train, n_val, n_test], generator=torch.Generator().manual_seed(42))
+    train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True)
+    val_loader   = DataLoader(val_set, batch_size=batch_size)
+    test_loader  = DataLoader(test_set, batch_size=batch_size)
 
-    train_loader = DataLoader(train_set, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)
-    val_loader = DataLoader(val_set, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
-    test_loader = DataLoader(test_set, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
-
-    model = CGCNN()
-    device = torch.device(args.device)
-    model.to(device)
-
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+    n_outputs = len(targets)
+    model = CGCNN(n_outputs=n_outputs, hidden=hidden, n_conv=n_conv, dropout=dropout).to(device)
+    opt = torch.optim.AdamW(model.parameters(), lr=lr)
+    loss_fn = torch.nn.L1Loss()  # MAE
 
     best_val = float("inf")
-    history = []
-    for epoch in range(1, args.epochs + 1):
-        train_mae = train_one_epoch(model, train_loader, optimizer, device)
-        val_mae = evaluate(model, val_loader, device)
-        history.append({"epoch": epoch, "train_mae": train_mae, "val_mae": val_mae})
-        print(f"Epoch {epoch:03d} | train MAE: {train_mae:.4f} | val MAE: {val_mae:.4f}")
+    for epoch in range(1, epochs+1):
+        tr = train_one_epoch(model, train_loader, opt, loss_fn, device)
+        va = eval_epoch(model, val_loader, loss_fn, device)
+        print(f"Epoch {epoch:03d} | train MAE: {tr:.4f} | val MAE: {va:.4f}")
+        if va < best_val:
+            best_val = va
+            os.makedirs(os.path.dirname(model_save), exist_ok=True)
+            torch.save({"model": model.state_dict(), "cfg": cfg}, model_save)
 
-        if val_mae < best_val:
-            best_val = val_mae
-            torch.save({"model": model.state_dict(), "epoch": epoch}, model_dir / "best.pt")
-
-    test_mae = evaluate(model, test_loader, device)
-    print(f"[bold green]Test MAE[/bold green]: {test_mae:.4f}")
-
-    with open(results_dir / "cgcnn_metrics.json", "w", encoding="utf-8") as f:
-        json.dump({"best_val_mae": best_val, "test_mae": test_mae, "history": history}, f, indent=2)
-
+    # Final test
+    ckpt = torch.load(model_save, map_location=device)
+    model.load_state_dict(ckpt["model"])
+    te = eval_epoch(model, test_loader, loss_fn, device)
+    print(f"✅ Test MAE: {te:.4f}")
+    with open("results/metrics.txt", "w") as f:
+        f.write(f"val_mae={best_val:.6f}\n")
+        f.write(f"test_mae={te:.6f}\n")
+    print("Saved results/metrics.txt")
 
 if __name__ == "__main__":
     main()
-
-
